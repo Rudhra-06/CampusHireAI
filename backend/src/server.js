@@ -3,6 +3,8 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import sequelize from './config/db.js';
+import validateEnv from './utils/envCheck.js';
+import { generalLimiter, authLimiter, aiLimiter } from './middleware/rateLimiter.js';
 import './models/User.js';
 import './models/Job.js';
 import './models/Application.js';
@@ -39,29 +41,54 @@ import chatbotRoutes from './routes/chatbot.js';
 
 dotenv.config();
 
+// Validate startup environment variables
+validateEnv();
+
 const app = express();
 
-app.use(cors());
+// Configure CORS
+const allowedOrigins = process.env.CLIENT_URL
+  ? process.env.CLIENT_URL.split(',').map(url => url.trim())
+  : ['http://localhost:3000', 'http://localhost:5173'];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS policy does not allow access from origin ${origin}`));
+    }
+  },
+  credentials: true,
+}));
+
 app.use(express.json());
-app.use('/uploads', express.static('uploads'));
 
-if (!fs.existsSync('uploads')) fs.mkdirSync('uploads', { recursive: true });
+// General rate limiter for all API requests
+app.use('/api', generalLimiter);
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
+// Local fallback uploads directory (only served if using local storage)
+if (!process.env.AWS_S3_BUCKET) {
+  if (!fs.existsSync('uploads')) fs.mkdirSync('uploads', { recursive: true });
+  app.use('/uploads', express.static('uploads'));
+}
 
-app.use('/api/auth', authRoutes);
+app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString(), env: process.env.NODE_ENV || 'development' }));
+
+// Apply specific rate limiters to Auth and AI routes
+app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/jobs', jobRoutes);
 app.use('/api/applications', applicationRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/upload', uploadRoutes);
-app.use('/api/interviews', interviewRoutes);
-app.use('/api/resume-analyzer', resumeAnalyzerRoutes);
+app.use('/api/interviews', aiLimiter, interviewRoutes);
+app.use('/api/resume-analyzer', aiLimiter, resumeAnalyzerRoutes);
 app.use('/api/resume-builder', resumeBuilderRoutes);
-app.use('/api/projects', projectRoutes);
-app.use('/api/cover-letter', coverLetterRoutes);
+app.use('/api/projects', aiLimiter, projectRoutes);
+app.use('/api/cover-letter', aiLimiter, coverLetterRoutes);
 app.use('/api/assessments', assessmentRoutes);
 app.use('/api/analytics', analyticsRoutes);
-app.use('/api/chatbot', chatbotRoutes);
+app.use('/api/chatbot', aiLimiter, chatbotRoutes);
 
 app.use((req, res) => res.status(404).json({ message: 'Route not found.' }));
 
@@ -71,10 +98,17 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5000;
+const isProduction = process.env.NODE_ENV === 'production';
 
-sequelize.sync({ alter: process.env.DB_SYNC_ALTER === 'true' })
+// Safe database initialization: Disable alter sync in production
+const syncOptions = isProduction
+  ? {} // Safe sync without alter in production
+  : { alter: process.env.DB_SYNC_ALTER === 'true' };
+
+sequelize.sync(syncOptions)
   .then(() => {
     console.log('PostgreSQL connected and tables synced');
-    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+    app.listen(PORT, () => console.log(`Server running on port ${PORT} [${process.env.NODE_ENV || 'development'}]`));
   })
   .catch(err => console.error('Database connection error:', err));
+

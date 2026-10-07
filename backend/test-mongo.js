@@ -1,5 +1,10 @@
+/**
+ * LEGACY / DEPRECATED: CampusHireAI uses PostgreSQL via Sequelize.
+ * This file is retained for reference only and is not used in production.
+ */
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
+
 
 dotenv.config();
 
